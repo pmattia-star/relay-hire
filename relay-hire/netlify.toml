@@ -1,0 +1,12 @@
+[build]
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/hire"
+  to = "/.netlify/functions/hire"
+  status = 200
+
+[[redirects]]
+  from = "/slack-interactions"
+  to = "/.netlify/functions/slack-interactions"
+  status = 200
