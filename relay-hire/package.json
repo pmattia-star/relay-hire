@@ -2,17 +2,6 @@
   "name": "relay-hire-slack",
   "version": "1.0.0",
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0"
+    "@supabase/supabase-js": "2.39.0"
   }
 }
-```
-
-So your final folder structure should look like:
-```
-relay-hire/
-├── netlify.toml
-├── package.json
-└── netlify/
-    └── functions/
-        ├── hire.js
-        └── slack-interactions.js
