@@ -1,6 +1,4 @@
 // netlify/functions/slack-interactions.js
-// Handles (1) modal submission → DM to approver + logs to Supabase + Google Sheets
-//         (2) approve/reject button clicks → notify requester + update sheet
 
 const { createClient } = require("@supabase/supabase-js");
 
@@ -15,46 +13,31 @@ const SHEET_ID = process.env.GOOGLE_SHEET_ID;
 async function getGoogleToken() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
   const now = Math.floor(Date.now() / 1000);
-
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify({
     iss: credentials.client_email,
     scope: "https://www.googleapis.com/auth/spreadsheets",
     aud: "https://oauth2.googleapis.com/token",
-    exp: now + 3600,
-    iat: now
+    exp: now + 3600, iat: now
   })).toString("base64url");
-
   const signingInput = `${header}.${payload}`;
-
-  const pemContents = credentials.private_key
-    .replace("-----BEGIN PRIVATE KEY-----", "")
-    .replace("-----END PRIVATE KEY-----", "")
-    .replace(/\n/g, "");
-
+  const pemContents = credentials.private_key.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "").replace(/\n/g, "");
   const binaryKey = Buffer.from(pemContents, "base64");
-  const cryptoKey = await crypto.subtle.importKey(
-    "pkcs8", binaryKey,
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false, ["sign"]
-  );
-
+  const cryptoKey = await crypto.subtle.importKey("pkcs8", binaryKey, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
   const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", cryptoKey, Buffer.from(signingInput));
   const jwt = `${signingInput}.${Buffer.from(signature).toString("base64url")}`;
-
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: jwt })
   });
-
   const tokenData = await tokenRes.json();
   return tokenData.access_token;
 }
 
 async function appendToSheet(token, values) {
   await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/Sheet1!A:M:append?valueInputOption=USER_ENTERED`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/Sheet1!A:N:append?valueInputOption=USER_ENTERED`,
     {
       method: "POST",
       headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
@@ -74,7 +57,7 @@ async function updateSheetStatus(token, requestId, status, decidedBy) {
   if (rowIndex === -1) return;
   const rowNumber = rowIndex + 1;
   await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/Sheet1!L${rowNumber}:M${rowNumber}?valueInputOption=USER_ENTERED`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/Sheet1!M${rowNumber}:N${rowNumber}?valueInputOption=USER_ENTERED`,
     {
       method: "PUT",
       headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
@@ -109,18 +92,31 @@ function extractValues(view) {
     start_date:     get("start_date"),
     salary_range:   get("salary_range"),
     reason:         get("reason"),
+    pre_approved:   get("pre_approved"),
     justification:  get("justification")
   };
 }
 
 const TEAM_LABELS = { data_analytics: "Data & Analytics", engineering: "Engineering", operations: "Operations", finance: "Finance", commercial: "Commercial", people: "People", product: "Product", other: "Other" };
-const LEVEL_LABELS = { junior: "Junior / Associate", mid: "Mid-level", senior: "Senior", lead: "Lead / Principal", manager: "Manager", head_of: "Head of", director: "Director+" };
 const REASON_LABELS = { backfill: "Backfill (leaver)", new_hc: "New headcount (growth)", project: "Project / contract", restructure: "Restructure" };
 
 async function handleModalSubmission(payload) {
   const vals     = extractValues(payload.view);
   const userId   = payload.user.id;
   const userName = payload.user.name;
+
+  // Enforce justification if not pre-approved
+  if (vals.pre_approved === "no" && (!vals.justification || vals.justification.trim() === "")) {
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        response_action: "errors",
+        errors: {
+          justification: "Business justification is required when the role has not been pre-approved."
+        }
+      })
+    };
+  }
 
   const { data, error } = await supabase
     .from("hire_requests")
@@ -129,11 +125,12 @@ async function handleModalSubmission(payload) {
       role_title: vals.role_title, team: vals.team, level: vals.level,
       hiring_manager_slack: vals.hiring_manager, target_start_date: vals.start_date,
       salary_range: vals.salary_range, reason: vals.reason,
+      pre_approved: vals.pre_approved === "yes",
       justification: vals.justification, status: "pending"
     }])
     .select().single();
 
-  if (error) { console.error("Supabase error:", error); return; }
+  if (error) { console.error("Supabase error:", error); return { statusCode: 200, body: "" }; }
   const requestId = data.id;
 
   try {
@@ -144,21 +141,23 @@ async function handleModalSubmission(payload) {
     );
     const checkData = await checkRes.json();
     if (!checkData.values) {
-      await appendToSheet(gToken, ["Request ID","Submitted At","Requester","Role Title","Team","Level","Hiring Manager","Target Start","Salary Range","Reason","Justification","Status","Decided By"]);
+      await appendToSheet(gToken, ["Request ID","Submitted At","Requester","Role Title","Team","Level","Hiring Manager","Target Start","Salary Range","Reason","Pre-Approved?","Justification","Status","Decided By"]);
     }
     await appendToSheet(gToken, [
       requestId, new Date().toISOString(), userName,
       vals.role_title, TEAM_LABELS[vals.team] ?? vals.team,
-      LEVEL_LABELS[vals.level] ?? vals.level, vals.hiring_manager,
+      vals.level, vals.hiring_manager,
       vals.start_date, vals.salary_range,
-      REASON_LABELS[vals.reason] ?? vals.reason, vals.justification,
+      REASON_LABELS[vals.reason] ?? vals.reason,
+      vals.pre_approved === "yes" ? "Yes" : "No",
+      vals.justification || "N/A",
       "Pending", ""
     ]);
   } catch (e) { console.error("Sheets error:", e); }
 
   const dmRes = await slackPost("conversations.open", { users: APPROVER_SLACK_ID });
   const dmChannel = dmRes.channel?.id;
-  if (!dmChannel) return;
+  if (!dmChannel) return { statusCode: 200, body: "" };
 
   await slackPost("chat.postMessage", {
     channel: dmChannel,
@@ -172,14 +171,15 @@ async function handleModalSubmission(payload) {
         fields: [
           { type: "mrkdwn", text: `*Role*\n${vals.role_title}` },
           { type: "mrkdwn", text: `*Team*\n${TEAM_LABELS[vals.team] ?? vals.team}` },
-          { type: "mrkdwn", text: `*Level*\n${LEVEL_LABELS[vals.level] ?? vals.level}` },
+          { type: "mrkdwn", text: `*Level*\n${vals.level}` },
           { type: "mrkdwn", text: `*Hiring Manager*\n<@${vals.hiring_manager}>` },
           { type: "mrkdwn", text: `*Target Start*\n${vals.start_date}` },
           { type: "mrkdwn", text: `*Salary Range*\n£${vals.salary_range}` },
-          { type: "mrkdwn", text: `*Reason*\n${REASON_LABELS[vals.reason] ?? vals.reason}` }
+          { type: "mrkdwn", text: `*Reason*\n${REASON_LABELS[vals.reason] ?? vals.reason}` },
+          { type: "mrkdwn", text: `*Pre-Approved?*\n${vals.pre_approved === "yes" ? "✅ Yes" : "❌ No"}` }
         ]
       },
-      { type: "section", text: { type: "mrkdwn", text: `*Justification*\n${vals.justification}` } },
+      { type: "section", text: { type: "mrkdwn", text: `*Justification*\n${vals.justification || "N/A"}` } },
       { type: "divider" },
       {
         type: "actions",
@@ -199,16 +199,17 @@ async function handleModalSubmission(payload) {
       text: `✅ Your hire request for *${vals.role_title}* has been submitted and is pending approval.`
     });
   }
+
+  return { statusCode: 200, body: "" };
 }
 
 async function handleAction(payload) {
   const action   = payload.actions[0];
   const approved = action.action_id === "approve_hire";
   const { requestId, requesterId } = JSON.parse(action.value);
-  const newStatus = approved ? "approved" : "rejected";
 
   await supabase.from("hire_requests")
-    .update({ status: newStatus, decided_by: payload.user.id, decided_at: new Date().toISOString() })
+    .update({ status: approved ? "approved" : "rejected", decided_by: payload.user.id, decided_at: new Date().toISOString() })
     .eq("id", requestId);
 
   try {
@@ -242,9 +243,9 @@ exports.handler = async (event) => {
   if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
   const params  = new URLSearchParams(event.body);
   const payload = JSON.parse(params.get("payload"));
+
   if (payload.type === "view_submission" && payload.view.callback_id === "hire_request") {
-    await handleModalSubmission(payload);
-    return { statusCode: 200, body: "" };
+    return await handleModalSubmission(payload);
   }
   if (payload.type === "block_actions") {
     await handleAction(payload);
