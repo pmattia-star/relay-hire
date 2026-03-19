@@ -80,6 +80,15 @@ async function updateSheetRow(token, requestId, status, approverCol, approverNam
   }
 }
 
+async function getSlackUserName(userId) {
+  const res = await fetch(`https://slack.com/api/users.info?user=${userId}`, {
+    headers: { "Authorization": `Bearer ${process.env.SLACK_BOT_TOKEN}` }
+  });
+  const data = await res.json();
+  if (data.ok) return data.user.real_name || data.user.name;
+  return userId;
+}
+
 async function slackPost(endpoint, body) {
   const res = await fetch(`https://slack.com/api/${endpoint}`, {
     method: "POST",
@@ -87,6 +96,17 @@ async function slackPost(endpoint, body) {
     body: JSON.stringify(body)
   });
   return res.json();
+}
+
+async function getSlackUserName(userId) {
+  const res = await fetch(`https://slack.com/api/users.info?user=${userId}`, {
+    headers: { "Authorization": `Bearer ${process.env.SLACK_BOT_TOKEN}` }
+  });
+  const data = await res.json();
+  if (data.ok) {
+    return data.user.real_name || data.user.name;
+  }
+  return userId;
 }
 
 function extractValues(view) {
@@ -176,6 +196,9 @@ async function handleModalSubmission(payload) {
   if (error) { console.error("Supabase error:", error); return { statusCode: 200, body: "" }; }
   const requestId = data.id;
 
+  // Look up hiring manager name
+  const hiringManagerName = await getSlackUserName(vals.hiring_manager);
+
   // Log to Google Sheets
   try {
     const gToken = await getGoogleToken();
@@ -190,7 +213,7 @@ async function handleModalSubmission(payload) {
     await appendToSheet(gToken, [
       requestId, new Date().toISOString(), userName,
       vals.role_title, TEAM_LABELS[vals.team] ?? vals.team,
-      vals.level, vals.hiring_manager,
+      vals.level, hiringManagerName,
       vals.start_date, vals.salary_range,
       REASON_LABELS[vals.reason] ?? vals.reason,
       vals.pre_approved === "yes" ? "Yes" : "No",
