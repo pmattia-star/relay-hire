@@ -4,7 +4,6 @@
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
 
-  // Parse Slack's URL-encoded body
   const params = new URLSearchParams(event.body);
   const triggerId = params.get("trigger_id");
 
@@ -56,13 +55,18 @@ exports.handler = async (event) => {
             action_id: "value",
             placeholder: { type: "plain_text", text: "Select level" },
             options: [
-              { text: { type: "plain_text", text: "Junior / Associate" }, value: "junior" },
-              { text: { type: "plain_text", text: "Mid-level"           }, value: "mid" },
-              { text: { type: "plain_text", text: "Senior"              }, value: "senior" },
-              { text: { type: "plain_text", text: "Lead / Principal"    }, value: "lead" },
-              { text: { type: "plain_text", text: "Manager"             }, value: "manager" },
-              { text: { type: "plain_text", text: "Head of"             }, value: "head_of" },
-              { text: { type: "plain_text", text: "Director+"           }, value: "director" }
+              { text: { type: "plain_text", text: "IC1" }, value: "IC1" },
+              { text: { type: "plain_text", text: "IC2" }, value: "IC2" },
+              { text: { type: "plain_text", text: "IC3" }, value: "IC3" },
+              { text: { type: "plain_text", text: "IC4" }, value: "IC4" },
+              { text: { type: "plain_text", text: "IC5" }, value: "IC5" },
+              { text: { type: "plain_text", text: "IC6" }, value: "IC6" },
+              { text: { type: "plain_text", text: "PM3" }, value: "PM3" },
+              { text: { type: "plain_text", text: "PM4" }, value: "PM4" },
+              { text: { type: "plain_text", text: "PM5" }, value: "PM5" },
+              { text: { type: "plain_text", text: "PM6" }, value: "PM6" },
+              { text: { type: "plain_text", text: "PM7" }, value: "PM7" },
+              { text: { type: "plain_text", text: "PM8" }, value: "PM8" }
             ]
           }
         },
@@ -114,8 +118,24 @@ exports.handler = async (event) => {
         },
         {
           type: "input",
+          block_id: "pre_approved",
+          label: { type: "plain_text", text: "Has this role already been approved?" },
+          element: {
+            type: "static_select",
+            action_id: "value",
+            placeholder: { type: "plain_text", text: "Select one" },
+            options: [
+              { text: { type: "plain_text", text: "Yes — already approved" }, value: "yes" },
+              { text: { type: "plain_text", text: "No — needs approval"    }, value: "no" }
+            ]
+          }
+        },
+        {
+          type: "input",
           block_id: "justification",
           label: { type: "plain_text", text: "Business Justification" },
+          hint: { type: "plain_text", text: "Required if role has not already been approved" },
+          optional: false,
           element: {
             type: "plain_text_input",
             action_id: "value",
@@ -142,6 +162,5 @@ exports.handler = async (event) => {
     return { statusCode: 500, body: "Failed to open modal" };
   }
 
-  // Slack requires a 200 with empty body for slash commands
   return { statusCode: 200, body: "" };
 };
