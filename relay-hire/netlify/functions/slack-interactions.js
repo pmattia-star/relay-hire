@@ -1,16 +1,61 @@
 // netlify/functions/slack-interactions.js
-// Two parallel approvers — both must approve before requester is notified
+// No external dependencies — uses Supabase REST API directly via fetch
 
-const { createClient } = require("@supabase/supabase-js");
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-);
-
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const APPROVER_1_SLACK_ID = process.env.APPROVER_SLACK_ID;
 const APPROVER_2_SLACK_ID = process.env.APPROVER_2_SLACK_ID;
 const SHEET_ID = process.env.GOOGLE_SHEET_ID;
+
+// ─── Supabase via REST ───────────────────────────────────────────────────────
+
+async function dbInsert(table, record) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Prefer": "return=representation"
+    },
+    body: JSON.stringify(record)
+  });
+  const data = await res.json();
+  if (!res.ok) { console.error("Supabase insert error:", data); return null; }
+  return Array.isArray(data) ? data[0] : data;
+}
+
+async function dbUpdate(table, match, updates) {
+  const params = new URLSearchParams(match).toString();
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${params}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Prefer": "return=representation"
+    },
+    body: JSON.stringify(updates)
+  });
+  const data = await res.json();
+  if (!res.ok) { console.error("Supabase update error:", data); return null; }
+  return Array.isArray(data) ? data[0] : data;
+}
+
+async function dbSelect(table, match) {
+  const params = new URLSearchParams(match).toString();
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${params}&limit=1`, {
+    headers: {
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`
+    }
+  });
+  const data = await res.json();
+  if (!res.ok) { console.error("Supabase select error:", data); return null; }
+  return Array.isArray(data) ? data[0] : data;
+}
+
+// ─── Google Sheets ───────────────────────────────────────────────────────────
 
 async function getGoogleToken() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
@@ -56,8 +101,6 @@ async function updateSheetRow(token, requestId, status, approverCol, approverNam
   const rowIndex = rows.findIndex(row => row[0] === requestId);
   if (rowIndex === -1) return;
   const rowNumber = rowIndex + 1;
-
-  // approverCol is "M" for approver1, "N" for approver2
   await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/Sheet1!${approverCol}${rowNumber}?valueInputOption=USER_ENTERED`,
     {
@@ -66,8 +109,6 @@ async function updateSheetRow(token, requestId, status, approverCol, approverNam
       body: JSON.stringify({ values: [[approverName]] })
     }
   );
-
-  // Update overall status in column L
   if (status) {
     await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/Sheet1!L${rowNumber}?valueInputOption=USER_ENTERED`,
@@ -80,14 +121,7 @@ async function updateSheetRow(token, requestId, status, approverCol, approverNam
   }
 }
 
-async function getSlackUserName(userId) {
-  const res = await fetch(`https://slack.com/api/users.info?user=${userId}`, {
-    headers: { "Authorization": `Bearer ${process.env.SLACK_BOT_TOKEN}` }
-  });
-  const data = await res.json();
-  if (data.ok) return data.user.real_name || data.user.name;
-  return userId;
-}
+// ─── Slack ───────────────────────────────────────────────────────────────────
 
 async function slackPost(endpoint, body) {
   const res = await fetch(`https://slack.com/api/${endpoint}`, {
@@ -103,11 +137,11 @@ async function getSlackUserName(userId) {
     headers: { "Authorization": `Bearer ${process.env.SLACK_BOT_TOKEN}` }
   });
   const data = await res.json();
-  if (data.ok) {
-    return data.user.real_name || data.user.name;
-  }
+  if (data.ok) return data.user.real_name || data.user.name;
   return userId;
 }
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function extractValues(view) {
   const v = view.state.values;
@@ -134,7 +168,7 @@ function extractValues(view) {
 const TEAM_LABELS = { data_analytics: "Data & Analytics", engineering: "Engineering", operations: "Operations", finance: "Finance", commercial: "Commercial", people: "People", product: "Product", other: "Other" };
 const REASON_LABELS = { backfill: "Backfill (leaver)", new_hc: "New headcount (growth)", project: "Project / contract", restructure: "Restructure" };
 
-function buildApprovalBlocks(vals, userId, requestId, approverNum) {
+function buildApprovalBlocks(vals, userId, requestId, approverNum, hiringManagerName) {
   return [
     { type: "header", text: { type: "plain_text", text: "🧑‍💼 New Hire Request" } },
     { type: "section", text: { type: "mrkdwn", text: `Submitted by <@${userId}>` } },
@@ -145,7 +179,7 @@ function buildApprovalBlocks(vals, userId, requestId, approverNum) {
         { type: "mrkdwn", text: `*Role*\n${vals.role_title}` },
         { type: "mrkdwn", text: `*Team*\n${TEAM_LABELS[vals.team] ?? vals.team}` },
         { type: "mrkdwn", text: `*Level*\n${vals.level}` },
-        { type: "mrkdwn", text: `*Hiring Manager*\n<@${vals.hiring_manager}>` },
+        { type: "mrkdwn", text: `*Hiring Manager*\n${hiringManagerName}` },
         { type: "mrkdwn", text: `*Target Start*\n${vals.start_date}` },
         { type: "mrkdwn", text: `*Salary Range*\n£${vals.salary_range}` },
         { type: "mrkdwn", text: `*Reason*\n${REASON_LABELS[vals.reason] ?? vals.reason}` },
@@ -164,6 +198,8 @@ function buildApprovalBlocks(vals, userId, requestId, approverNum) {
   ];
 }
 
+// ─── Modal submission ─────────────────────────────────────────────────────────
+
 async function handleModalSubmission(payload) {
   const vals     = extractValues(payload.view);
   const userId   = payload.user.id;
@@ -180,26 +216,21 @@ async function handleModalSubmission(payload) {
     };
   }
 
-  const { data, error } = await supabase
-    .from("hire_requests")
-    .insert([{
-      requester_slack_id: userId, requester_name: userName,
-      role_title: vals.role_title, team: vals.team, level: vals.level,
-      hiring_manager_slack: vals.hiring_manager, target_start_date: vals.start_date,
-      salary_range: vals.salary_range, reason: vals.reason,
-      pre_approved: vals.pre_approved === "yes",
-      justification: vals.justification, status: "pending",
-      approver1_status: "pending", approver2_status: "pending"
-    }])
-    .select().single();
+  const record = await dbInsert("hire_requests", {
+    requester_slack_id: userId, requester_name: userName,
+    role_title: vals.role_title, team: vals.team, level: vals.level,
+    hiring_manager_slack: vals.hiring_manager, target_start_date: vals.start_date,
+    salary_range: vals.salary_range, reason: vals.reason,
+    pre_approved: vals.pre_approved === "yes",
+    justification: vals.justification, status: "pending",
+    approver1_status: "pending", approver2_status: "pending"
+  });
 
-  if (error) { console.error("Supabase error:", error); return { statusCode: 200, body: "" }; }
-  const requestId = data.id;
+  if (!record) return { statusCode: 200, body: "" };
+  const requestId = record.id;
 
-  // Look up hiring manager name
   const hiringManagerName = await getSlackUserName(vals.hiring_manager);
 
-  // Log to Google Sheets
   try {
     const gToken = await getGoogleToken();
     const checkRes = await fetch(
@@ -221,7 +252,6 @@ async function handleModalSubmission(payload) {
     ]);
   } catch (e) { console.error("Sheets error:", e); }
 
-  // DM both approvers simultaneously
   for (const [approverId, approverNum] of [[APPROVER_1_SLACK_ID, 1], [APPROVER_2_SLACK_ID, 2]]) {
     const dmRes = await slackPost("conversations.open", { users: approverId });
     const dmChannel = dmRes.channel?.id;
@@ -229,12 +259,11 @@ async function handleModalSubmission(payload) {
       await slackPost("chat.postMessage", {
         channel: dmChannel,
         text: `New hire request from <@${userId}>`,
-        blocks: buildApprovalBlocks(vals, userId, requestId, approverNum)
+        blocks: buildApprovalBlocks(vals, userId, requestId, approverNum, hiringManagerName)
       });
     }
   }
 
-  // Confirm to requester
   const requesterDm = await slackPost("conversations.open", { users: userId });
   const rc = requesterDm.channel?.id;
   if (rc) {
@@ -247,6 +276,8 @@ async function handleModalSubmission(payload) {
   return { statusCode: 200, body: "" };
 }
 
+// ─── Button action ────────────────────────────────────────────────────────────
+
 async function handleAction(payload) {
   const action      = payload.actions[0];
   const approved    = action.action_id === "approve_hire";
@@ -254,34 +285,23 @@ async function handleAction(payload) {
   const approverName = payload.user.name;
 
   const statusField = approverNum === 1 ? "approver1_status" : "approver2_status";
-  const newStatus   = approved ? "approved" : "rejected";
+  await dbUpdate("hire_requests", { id: `eq.${requestId}` }, { [statusField]: approved ? "approved" : "rejected" });
 
-  // Update this approver's status in Supabase
-  await supabase.from("hire_requests")
-    .update({ [statusField]: newStatus })
-    .eq("id", requestId);
-
-  // Fetch current state of both approvals
-  const { data } = await supabase.from("hire_requests").select("*").eq("id", requestId).single();
-  const approver1Done = data.approver1_status;
-  const approver2Done = data.approver2_status;
+  const data = await dbSelect("hire_requests", { id: `eq.${requestId}` });
 
   let overallStatus = null;
   let requesterMessage = null;
 
   if (!approved) {
-    // Immediate rejection
     overallStatus = "rejected";
-    requesterMessage = `❌ Your hire request for *${data.role_title}* has been *rejected* by <@${payload.user.id}>. Reach out to them directly for more detail.`;
-    await supabase.from("hire_requests").update({ status: "rejected", decided_by: payload.user.id, decided_at: new Date().toISOString() }).eq("id", requestId);
-  } else if (approver1Done === "approved" && approver2Done === "approved") {
-    // Both approved
+    requesterMessage = `❌ Your hire request for *${data?.role_title}* has been *rejected* by <@${payload.user.id}>. Reach out to them directly for more detail.`;
+    await dbUpdate("hire_requests", { id: `eq.${requestId}` }, { status: "rejected", decided_by: payload.user.id, decided_at: new Date().toISOString() });
+  } else if (data?.approver1_status === "approved" && data?.approver2_status === "approved") {
     overallStatus = "approved";
-    requesterMessage = `✅ Your hire request for *${data.role_title}* has been *approved* by both approvers. People team will be in touch.`;
-    await supabase.from("hire_requests").update({ status: "approved", decided_by: payload.user.id, decided_at: new Date().toISOString() }).eq("id", requestId);
+    requesterMessage = `✅ Your hire request for *${data?.role_title}* has been *approved* by both approvers. People team will be in touch.`;
+    await dbUpdate("hire_requests", { id: `eq.${requestId}` }, { status: "approved", decided_by: payload.user.id, decided_at: new Date().toISOString() });
   }
 
-  // Update Google Sheet
   try {
     const gToken = await getGoogleToken();
     const approverCol = approverNum === 1 ? "M" : "N";
@@ -290,7 +310,6 @@ async function handleAction(payload) {
     await updateSheetRow(gToken, requestId, sheetStatus, approverCol, approverLabel);
   } catch (e) { console.error("Sheets update error:", e); }
 
-  // Update the approver's message (replace buttons with their decision)
   await slackPost("chat.update", {
     channel: payload.channel.id,
     ts: payload.message.ts,
@@ -301,15 +320,14 @@ async function handleAction(payload) {
     ]
   });
 
-  // Notify requester only on rejection or full approval
   if (requesterMessage) {
     const dmRes = await slackPost("conversations.open", { users: requesterId });
     const dc = dmRes.channel?.id;
-    if (dc) {
-      await slackPost("chat.postMessage", { channel: dc, text: requesterMessage });
-    }
+    if (dc) await slackPost("chat.postMessage", { channel: dc, text: requesterMessage });
   }
 }
+
+// ─── Handler ──────────────────────────────────────────────────────────────────
 
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
